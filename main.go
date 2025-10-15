@@ -23,6 +23,7 @@ type GridFamily struct {
 	DashLength float64 // length of drawn segment in pixels; 0 means solid
 	GapLength  float64 // length of gap between segments in pixels; 0 means solid
 	DashPhase  float64 // accumulated shift along tangent (pixels) to scroll dash pattern
+	DashOffset float64 // static phase offset (pixels) applied to the first dash/gap; does not change with motion
 }
 
 // Game holds the entire app state.
@@ -52,17 +53,37 @@ func NewGame() *Game {
 	w, h := 960, 640
 	// Define some default grids
 	grids := []GridFamily{
-		{Normal: Vec2{1, 0}.Norm(), Spacing: 60, Offset: 0, Color: color.RGBA{0x66, 0x66, 0xFF, 0xFF}, Thickness: 2, GapLength: 60, DashLength: 60},
-		{Normal: Vec2{0, 1}.Norm(), Spacing: 60, Offset: 0, Color: color.RGBA{0x66, 0xFF, 0x66, 0xFF}, Thickness: 2},
-		{Normal: Vec2{1, 1}.Norm(), Spacing: 85, Offset: 0, Color: color.RGBA{0xFF, 0x66, 0x66, 0xFF}, Thickness: 2},
+		{
+			Normal:     Vec2{1, 0}.Norm(),
+			Spacing:    60,
+			Offset:     0,
+			Color:      color.RGBA{0x66, 0x66, 0xFF, 0xFF},
+			Thickness:  2,
+			GapLength:  60,
+			DashLength: 60,
+			DashOffset: 15,
+		},
+		{
+			Normal:     Vec2{1, 0}.Norm(),
+			Spacing:    60,
+			Offset:     30,
+			Color:      color.RGBA{0x66, 0x66, 0xFF, 0xFF},
+			Thickness:  2,
+			GapLength:  60,
+			DashLength: 60,
+			DashOffset: 75,
+		},
+		{
+			Normal:    Vec2{0, 1}.Norm(),
+			Spacing:   60,
+			Offset:    0,
+			Color:     color.RGBA{0x66, 0xFF, 0x66, 0xFF},
+			Thickness: 2,
+		},
 	}
-	// Some fixed points
+	// fixed point
 	points := []Vec2{
-		{float64(w) * 0.25, float64(h) * 0.5},
 		{float64(w) * 0.5, float64(h) * 0.5},
-		{float64(w) * 0.75, float64(h) * 0.5},
-		{float64(w) * 0.5, float64(h) * 0.25},
-		{float64(w) * 0.5, float64(h) * 0.75},
 	}
 
 	last := make([][]bool, len(grids))
@@ -218,7 +239,7 @@ func (g *Game) Update() error {
 					// Signed coordinate of the point along the tangent axis with origin at pt
 					s0 := t.Dot(p.Sub(pt))
 					// Position along the drawn line measured from p1 toward p2
-					pos := diag - s0 - gf.DashPhase
+					pos := diag - s0 - (gf.DashPhase + gf.DashOffset)
 					period := gf.DashLength + gf.GapLength
 					// Normalize modulo in [0, period)
 					m := math.Mod(math.Mod(pos, period)+period, period)
@@ -269,7 +290,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			// shift endpoints along tangent by DashPhase to scroll the pattern (only for dashed lines)
 			shift := Vec2{0, 0}
 			if gf.DashLength > 0 && gf.GapLength > 0 {
-				shift = t.Mul(gf.DashPhase)
+				shift = t.Mul(gf.DashPhase + gf.DashOffset)
 			}
 			p1 := pt.Add(t.Mul(diag)).Sub(shift)
 			p2 := pt.Sub(t.Mul(diag)).Sub(shift)
