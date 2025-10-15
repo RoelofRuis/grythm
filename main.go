@@ -15,11 +15,14 @@ import (
 // GridFamily represents a family of infinite parallel grid lines.
 // Each line satisfies n·(x - center) = k*Spacing + Offset for some integer k.
 type GridFamily struct {
-	Normal    Vec2    // must be normalized
-	Spacing   float64 // pixels between lines
-	Offset    float64 // pixels along normal from center
-	Color     color.Color
-	Thickness float64 // half-thickness used for touch detection and drawing width
+	Normal     Vec2    // must be normalized
+	Spacing    float64 // pixels between lines
+	Offset     float64 // pixels along normal from center
+	Color      color.Color
+	Thickness  float64 // half-thickness used for touch detection and drawing width
+	DashLength float64 // length of drawn segment in pixels; 0 means solid
+	GapLength  float64 // length of gap between segments in pixels; 0 means solid
+	DashPhase  float64 // accumulated shift along tangent (pixels) to scroll dash pattern
 }
 
 // Game holds the entire app state.
@@ -46,9 +49,9 @@ func NewGame() *Game {
 	w, h := 960, 640
 	// Define some default grids
 	grids := []GridFamily{
-		{Normal: Vec2{1, 0}.Norm(), Spacing: 60, Offset: 0, Color: color.RGBA{0x66, 0x66, 0xFF, 0xFF}, Thickness: 2},
+		{Normal: Vec2{1, 0}.Norm(), Spacing: 60, Offset: 0, Color: color.RGBA{0x66, 0x66, 0xFF, 0xFF}, Thickness: 2, GapLength: 60, DashLength: 60},
 		{Normal: Vec2{0, 1}.Norm(), Spacing: 60, Offset: 0, Color: color.RGBA{0x66, 0xFF, 0x66, 0xFF}, Thickness: 2},
-		{Normal: Vec2{1, 1}.Norm(), Spacing: 85, Offset: 0, Color: color.RGBA{0xFF, 0x66, 0x66, 0xFF}, Thickness: 2},
+		//{Normal: Vec2{1, 1}.Norm(), Spacing: 85, Offset: 0, Color: color.RGBA{0xFF, 0x66, 0x66, 0xFF}, Thickness: 2},
 	}
 	// Some fixed points
 	points := []Vec2{
@@ -149,12 +152,20 @@ func (g *Game) Update() error {
 	// Advance offsets based on projection of movement onto grid normals
 	step := g.moveDir.Mul(g.speed * dt)
 	for i := range g.Grids {
-		proj := g.Grids[i].Normal.Dot(step)
-		g.Grids[i].Offset += proj
+		// normal movement: slides lines across screen
+		n := g.Grids[i].Normal
+		projN := n.Dot(step)
+		g.Grids[i].Offset += projN
+		// tangential movement: scrolls dash pattern along the line direction
+			t := n.Perp()
+			projT := t.Dot(step)
+			// Subtract so that a positive motion along +t moves the visible pattern along +t on screen
+			g.Grids[i].DashPhase -= projT
 	}
 
 	// Touch detection and blips
 	center := Vec2{float64(g.W) / 2, float64(g.H) / 2}
+	diag := math.Hypot(float64(g.W), float64(g.H))
 	for gi, gf := range g.Grids {
 		th := gf.Thickness
 		for pi, p := range g.Points {
@@ -164,8 +175,31 @@ func (g *Game) Update() error {
 			// Find nearest integer k such that |dAlong - (k*Spacing + Offset)| minimized
 			k := math.Round((dAlong - gf.Offset) / gf.Spacing)
 			closest := (k * gf.Spacing) + gf.Offset
-			d := math.Abs(dAlong - closest)
-			inside := d <= th
+			// Distance to the nearest infinite line in this family
+			dist := math.Abs(dAlong - closest)
+
+			// If within thickness band, also respect dash/gap so gaps don't trigger
+			inside := false
+			if dist <= th {
+				// Solid lines when dash or gap is non-positive
+				if gf.DashLength <= 0 || gf.GapLength <= 0 {
+					inside = true
+				} else {
+					// Reproduce the same dash phase as drawing: dashes start at p1 = pt + t*diag
+					n := gf.Normal
+					t := n.Perp()
+					pt := center.Add(n.Mul(closest))
+					// Signed coordinate of the point along the tangent axis with origin at pt
+					s0 := t.Dot(p.Sub(pt))
+					// Position along the drawn line measured from p1 toward p2
+						pos := diag - s0 - gf.DashPhase
+					period := gf.DashLength + gf.GapLength
+					// Normalize modulo in [0, period)
+					m := math.Mod(math.Mod(pos, period)+period, period)
+					inside = m < gf.DashLength
+				}
+			}
+
 			if inside && !g.lastInside[gi][pi] {
 				g.playBlip()
 			}
@@ -192,10 +226,15 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		for k := kMin; k <= kMax; k++ {
 			d := float64(k)*gf.Spacing + gf.Offset
 			pt := center.Add(n.Mul(d))
-			p1 := pt.Add(t.Mul(diag))
-			p2 := pt.Sub(t.Mul(diag))
-			// Draw line
-			vector.StrokeLine(screen, float32(p1.X), float32(p1.Y), float32(p2.X), float32(p2.Y), 1.5, gf.Color, true)
+			// shift endpoints along tangent by DashPhase to scroll the pattern (only for dashed lines)
+			shift := Vec2{0, 0}
+			if gf.DashLength > 0 && gf.GapLength > 0 {
+				shift = t.Mul(gf.DashPhase)
+			}
+			p1 := pt.Add(t.Mul(diag)).Sub(shift)
+			p2 := pt.Sub(t.Mul(diag)).Sub(shift)
+			// Draw solid or dashed line depending on dash/gap settings
+			drawDashedLine(screen, p1, p2, 1.5, gf.Color, gf.DashLength, gf.GapLength)
 		}
 	}
 
@@ -224,6 +263,32 @@ func drawCross(dst *ebiten.Image, p Vec2, size float64, col color.Color) {
 	// Two lines crossing at p
 	vector.StrokeLine(dst, float32(p.X-size), float32(p.Y), float32(p.X+size), float32(p.Y), 1.5, col, true)
 	vector.StrokeLine(dst, float32(p.X), float32(p.Y-size), float32(p.X), float32(p.Y+size), 1.5, col, true)
+}
+
+// drawDashedLine draws a line from p1 to p2 with optional dashes.
+// If dash<=0 or gap<=0, it draws a solid line.
+func drawDashedLine(dst *ebiten.Image, p1, p2 Vec2, width float64, col color.Color, dash, gap float64) {
+	delta := p2.Sub(p1)
+	L := delta.Len()
+	if L <= 0 {
+		return
+	}
+	if dash <= 0 || gap <= 0 {
+		vector.StrokeLine(dst, float32(p1.X), float32(p1.Y), float32(p2.X), float32(p2.Y), float32(width), col, true)
+		return
+	}
+	u := delta.Mul(1.0 / L)
+	pos := 0.0
+	for pos < L {
+		end := pos + dash
+		if end > L {
+			end = L
+		}
+		a := p1.Add(u.Mul(pos))
+		b := p1.Add(u.Mul(end))
+		vector.StrokeLine(dst, float32(a.X), float32(a.Y), float32(b.X), float32(b.Y), float32(width), col, true)
+		pos += dash + gap
+	}
 }
 
 func (g *Game) playBlip() {
