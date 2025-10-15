@@ -36,6 +36,9 @@ type Game struct {
 
 	lastInside [][]bool // [gridIdx][pointIdx] whether point was inside thickness band last frame
 
+	// visual cues per point (1.0 just triggered -> 0.0 faded)
+	cueTimers []float64
+
 	// hover/click state
 	hoverIdx int // -1 if none hovered
 
@@ -51,7 +54,7 @@ func NewGame() *Game {
 	grids := []GridFamily{
 		{Normal: Vec2{1, 0}.Norm(), Spacing: 60, Offset: 0, Color: color.RGBA{0x66, 0x66, 0xFF, 0xFF}, Thickness: 2, GapLength: 60, DashLength: 60},
 		{Normal: Vec2{0, 1}.Norm(), Spacing: 60, Offset: 0, Color: color.RGBA{0x66, 0xFF, 0x66, 0xFF}, Thickness: 2},
-		//{Normal: Vec2{1, 1}.Norm(), Spacing: 85, Offset: 0, Color: color.RGBA{0xFF, 0x66, 0x66, 0xFF}, Thickness: 2},
+		{Normal: Vec2{1, 1}.Norm(), Spacing: 85, Offset: 0, Color: color.RGBA{0xFF, 0x66, 0x66, 0xFF}, Thickness: 2},
 	}
 	// Some fixed points
 	points := []Vec2{
@@ -79,6 +82,7 @@ func NewGame() *Game {
 		moveDir:        Vec2{1, 0.3}.Norm(),
 		speed:          120, // px/sec
 		lastInside:     last,
+		cueTimers:      make([]float64, len(points)),
 		hoverIdx:       -1,
 		audioCtx:       ac,
 		blipPCM:        blip,
@@ -115,6 +119,8 @@ func (g *Game) Update() error {
 				row := g.lastInside[gi]
 				g.lastInside[gi] = append(row[:idx], row[idx+1:]...)
 			}
+			// remove corresponding cue timer
+			g.cueTimers = append(g.cueTimers[:idx], g.cueTimers[idx+1:]...)
 			g.hoverIdx = -1
 		} else {
 			// Add new point at mouse position
@@ -122,6 +128,7 @@ func (g *Game) Update() error {
 			for gi := range g.lastInside {
 				g.lastInside[gi] = append(g.lastInside[gi], false)
 			}
+			g.cueTimers = append(g.cueTimers, 0)
 		}
 	}
 
@@ -156,11 +163,30 @@ func (g *Game) Update() error {
 		n := g.Grids[i].Normal
 		projN := n.Dot(step)
 		g.Grids[i].Offset += projN
+		// Wrap offset so it never drifts far from the origin. This keeps drawing stable without changing the pattern.
+		if sp := g.Grids[i].Spacing; sp > 0 {
+			o := math.Mod(g.Grids[i].Offset, sp)
+			if o < 0 {
+				o += sp
+			}
+			g.Grids[i].Offset = o
+		}
 		// tangential movement: scrolls dash pattern along the line direction
-			t := n.Perp()
-			projT := t.Dot(step)
-			// Subtract so that a positive motion along +t moves the visible pattern along +t on screen
-			g.Grids[i].DashPhase -= projT
+		t := n.Perp()
+		projT := t.Dot(step)
+		// Subtract so that a positive motion along +t moves the visible pattern along +t on screen
+		g.Grids[i].DashPhase -= projT
+		// Wrap dash phase to keep the dashed pattern phase bounded (no visual change)
+		period := g.Grids[i].DashLength + g.Grids[i].GapLength
+		if period > 0 {
+			dp := math.Mod(g.Grids[i].DashPhase, period)
+			if dp < 0 {
+				dp += period
+			}
+			g.Grids[i].DashPhase = dp
+		} else {
+			g.Grids[i].DashPhase = 0
+		}
 	}
 
 	// Touch detection and blips
@@ -192,7 +218,7 @@ func (g *Game) Update() error {
 					// Signed coordinate of the point along the tangent axis with origin at pt
 					s0 := t.Dot(p.Sub(pt))
 					// Position along the drawn line measured from p1 toward p2
-						pos := diag - s0 - gf.DashPhase
+					pos := diag - s0 - gf.DashPhase
 					period := gf.DashLength + gf.GapLength
 					// Normalize modulo in [0, period)
 					m := math.Mod(math.Mod(pos, period)+period, period)
@@ -202,11 +228,25 @@ func (g *Game) Update() error {
 
 			if inside && !g.lastInside[gi][pi] {
 				g.playBlip()
+				// start visual cue for this point
+				if pi >= 0 && pi < len(g.cueTimers) {
+					g.cueTimers[pi] = 1.0
+				}
 			}
 			g.lastInside[gi][pi] = inside
 		}
 	}
 
+	// Decay visual cue timers
+	decay := 0.4 // seconds to fade out
+	for i := range g.cueTimers {
+		if g.cueTimers[i] > 0 {
+			g.cueTimers[i] -= dt / decay
+			if g.cueTimers[i] < 0 {
+				g.cueTimers[i] = 0
+			}
+		}
+	}
 	return nil
 }
 
@@ -238,8 +278,21 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		}
 	}
 
-	// Draw points
+	// Draw visual cues and points
 	for i, p := range g.Points {
+		// visual cue ring if active
+		t := 0.0
+		if i < len(g.cueTimers) {
+			t = g.cueTimers[i]
+		}
+		if t > 0 {
+			r := 8.0 + (1.0-t)*24.0
+			alpha := uint8(200 * t)
+			col := color.RGBA{0xFF, 0xFF, 0x99, alpha}
+			vector.StrokeCircle(screen, float32(p.X), float32(p.Y), float32(r), 2.0, col, true)
+		}
+
+		// point glyph
 		if i == g.hoverIdx {
 			// highlighted point
 			drawCross(screen, p, 8, color.RGBA{0xFF, 0xFF, 0x66, 0xFF})
